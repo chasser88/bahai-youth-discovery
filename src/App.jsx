@@ -554,7 +554,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFontSize(11);
     doc.setFont("helvetica", "bolditalic");
     doc.setTextColor(...ORANGE);
-    const affLines = doc.splitTextToSize(`"${result.affirmation}"`, usable);
+    const affLines = doc.splitTextToSize('"' +result.affirmation + '"`, usable);
     affLines.forEach(l => { checkPage(8); doc.text(l, margin, y); y += 6.5; });
     y += 6;
 
@@ -566,8 +566,8 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFontSize(8.5);
     doc.setFont("helvetica", "italic");
     doc.setTextColor(90, 106, 88);
-    const affLines = doc.splitTextToSize(
-      '"$The earth is but one country, and mankind its citizens." — Bahá'u'lláh',
+    const q3fLines = doc.splitTextToSize(
+      '"The earth is but one country, and mankind its citizens." — Bahá'u'lláh',
       usable - 8
     );
     q3Lines.forEach(l => { doc.text(l, margin + 6, y + 5); y += 6; });
