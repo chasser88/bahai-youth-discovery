@@ -2,9 +2,6 @@ import { useState, useEffect } from "react";
 
 // jsPDF loaded from CDN via index.html -- available as window.jspdf.jsPDF
 
-const AIRTABLE_TOKEN = import.meta.env.VITE_AIRTABLE_TOKEN;
-const AIRTABLE_BASE_ID = import.meta.env.VITE_AIRTABLE_BASE_ID;
-
 const QUESTIONS = [
   {
     id: "q1", section: "Your World",
@@ -134,34 +131,30 @@ const SECTION_COLORS = {
 };
 
 async function saveToAirtable(name, answers, result) {
-  if (!AIRTABLE_TOKEN || !AIRTABLE_BASE_ID) return;
   const formattedAnswers = QUESTIONS.map(q => {
     const ans = answers[q.id];
     let formatted = "--";
     if (ans) {
       if (q.type === "location") {
-        formatted = `${ans.country || "--"}${ans.access?.length ? ` | Has: ${ans.access.join(", ")}` : ""}`;
+        formatted = (ans.country || "--") + (ans.access && ans.access.length ? " | Has: " + ans.access.join(", ") : "");
       } else {
         formatted = Array.isArray(ans) ? ans.join(", ") : ans;
       }
     }
-    return `${q.question}\n→ ${formatted}`;
+    return q.question + "\n-> " + formatted;
   }).join("\n\n");
 
   const locationAnswer = answers["q19"];
   const locationStr = locationAnswer
-    ? `${locationAnswer.country || "--"}${locationAnswer.access?.length ? ` (${locationAnswer.access.join(", ")})` : ""}`
+    ? (locationAnswer.country || "--") + (locationAnswer.access && locationAnswer.access.length ? " (" + locationAnswer.access.join(", ") + ")" : "")
     : "--";
 
   try {
-    await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Responses`, {
+    const res = await fetch("/api/generate", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${AIRTABLE_TOKEN}`,
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        fields: {
+        saveData: {
           Name: name,
           "Submitted At": new Date().toISOString().split("T")[0],
           Answers: formattedAnswers,
@@ -173,8 +166,12 @@ async function saveToAirtable(name, answers, result) {
         }
       })
     });
+    const data = await res.json();
+    if (!data.saved) {
+      console.error("Airtable save failed:", data.error);
+    }
   } catch (err) {
-    console.error("Airtable save error:", err);
+    console.error("Airtable save error:", err.message);
   }
 }
 
@@ -567,7 +564,8 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFont("helvetica", "italic");
     doc.setTextColor(90, 106, 88);
     const q3Lines = doc.splitTextToSize(
-      '"The earth is but one country, and mankind its citizens. - Bahá u lláh"', usable - 8
+      "The earth is but one country, and mankind its citizens. - Baha u llah",
+      usable - 8
     );
     q3Lines.forEach(l => { doc.text(l, margin + 6, y + 5); y += 6; });
     y += 8;
