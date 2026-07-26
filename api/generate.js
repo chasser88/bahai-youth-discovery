@@ -37,18 +37,24 @@ export default async function handler(req, res) {
             Authorization: `Bearer ${airtableToken}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify({ fields: saveData })
+          body: JSON.stringify({ fields: saveData, typecast: true })
         }
       );
 
       const atRaw = await atRes.text();
+      let atData = null;
+      try { atData = JSON.parse(atRaw); } catch { atData = null; }
+
       if (!atRes.ok) {
-        console.error("Airtable error", atRes.status, atRaw);
-        let msg = "Airtable error";
-        try { msg = JSON.parse(atRaw)?.error?.message || msg; } catch {}
-        return res.status(200).json({ saved: false, error: msg });
+        console.error("Airtable error", atRes.status, atRaw.slice(0, 400));
+        return res.status(200).json({
+          saved: false,
+          error: atData?.error?.message || "Airtable error"
+        });
       }
-      return res.status(200).json({ saved: true });
+
+      // The record id lets the frontend link a new account to this submission.
+      return res.status(200).json({ saved: true, recordId: atData?.id || "" });
     }
 
     // ---- AI generation ----
@@ -82,9 +88,7 @@ export default async function handler(req, res) {
       });
     } catch (e) {
       if (e.name === "AbortError") {
-        return res.status(504).json({
-          error: "Generation timed out. Please try again."
-        });
+        return res.status(504).json({ error: "Generation timed out. Please try again." });
       }
       throw e;
     } finally {
