@@ -2,4 +2,8 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" }
   ]
+
+  "functions": {
+    "api/generate.js": { "maxDuration": 60 }
+  }
 }
