@@ -63,7 +63,7 @@ export default async function handler(req) {
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         max_tokens: 2000,
         system: "You are a helpful assistant. Always respond with valid JSON only. No markdown, no backticks, no explanation — just the raw JSON object starting with { and ending with }.",
         messages: [{ role: "user", content: prompt }]
