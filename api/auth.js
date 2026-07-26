@@ -237,6 +237,6 @@ export default async function handler(req, res) {
     return send(res, 400, { error: "Unknown action" });
   } catch (err) {
     console.error("auth failed:", action, err);
-    return send(res, 500, { error: err.message });
+    return send(res, 500, { error: String(err.message) });
   }
 }
