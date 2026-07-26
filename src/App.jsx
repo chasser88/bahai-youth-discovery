@@ -143,6 +143,7 @@ const SECTION_COLORS = {
   "Learning Style": "#6BBFBF", "Your Spirit": "#A08FD4", "Your Environment": "#5BB8A0", "Your Contact": "#7B68EE"
 };
 
+// Returns true if the record was written to Airtable, false otherwise.
 async function saveToAirtable(name, answers, result) {
   const formattedAnswers = QUESTIONS.map(q => {
     const ans = answers[q.id];
@@ -181,12 +182,19 @@ async function saveToAirtable(name, answers, result) {
         }
       })
     });
-    const data = await res.json();
-    if (!data.saved) {
-      console.error("Airtable save failed:", data.error);
+
+    const raw = await res.text();
+    let data = null;
+    try { data = JSON.parse(raw); } catch { data = null; }
+
+    if (!res.ok || !data || !data.saved) {
+      console.error("Airtable save failed:", res.status, data?.error || raw.slice(0, 300));
+      return false;
     }
+    return true;
   } catch (err) {
     console.error("Airtable save error:", err.message);
+    return false;
   }
 }
 
@@ -324,28 +332,45 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
         body: JSON.stringify({ prompt })
       });
 
+      // Read as text first -- error pages (504 timeouts, gateway errors) are NOT JSON,
+      // and calling res.json() on them throws and hides the real status code.
+      const raw = await res.text();
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { parsed = null; }
+
       if (!res.ok) {
-        const errData = await res.json();
-        setResult({ error: true, message: errData?.error || `Server error: ${res.status}` });
+        console.error("API failed", res.status, raw.slice(0, 500));
+        const msg = parsed?.error
+          || (res.status === 504
+              ? "This is taking longer than expected. Please tap Try Again."
+              : `Server error (${res.status}). Please try again.`);
+        setResult({ error: true, message: msg });
         setPhase("result");
         return;
       }
 
-      const parsed = await res.json();
+      // Validate the shape before rendering -- a JSON object missing these keys
+      // would otherwise crash mid-render with a blank screen and no message.
+      const required = ["core_identity", "primary_path", "alternative_path",
+                        "90_day_plan", "top_interests", "skill_gaps"];
+      const missing = (!parsed || typeof parsed !== "object")
+        ? required
+        : required.filter(k => !parsed[k]);
 
-      if (!parsed || typeof parsed !== "object") {
-        setResult({ error: true, message: "Invalid response from server. Please try again." });
+      if (missing.length) {
+        console.error("Incomplete roadmap. Missing:", missing, raw.slice(0, 300));
+        setResult({ error: true, message: "Your roadmap came back incomplete. Please tap Try Again." });
         setPhase("result");
         return;
       }
 
       setResult(parsed);
-      await saveToAirtable(userName, answers, parsed);
-      setSaved(true);
+      const savedOk = await saveToAirtable(userName, answers, parsed);
+      setSaved(savedOk);
       setPhase("result");
     } catch (err) {
       console.error("API Error:", err);
-      setResult({ error: true, message: err.message || "Network error. Check your connection and try again." });
+      setResult({ error: true, message: "Network error. Check your connection and try again." });
       setPhase("result");
     }
   }
@@ -493,7 +518,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFontSize(11);
     doc.setFont("helvetica", "normal");
     doc.setTextColor(...MID);
-    const greetLines = doc.splitTextToSize(result.name_greeting, usable);
+    const greetLines = doc.splitTextToSize(result.name_greeting || "", usable);
     greetLines.forEach(l => { doc.text(l, margin, y); y += 6; });
     y += 8;
 
@@ -509,11 +534,11 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFontSize(14);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(...GREEN);
-    doc.text('"' + result.core_identity.title + '"', margin + 6, y + 18);
+    doc.text('"' + (result.core_identity?.title || "") + '"', margin + 6, y + 18);
     doc.setFontSize(9);
     doc.setFont("helvetica", "normal");
     doc.setTextColor(...MID);
-    const idLines = doc.splitTextToSize(result.core_identity.description, usable - 12);
+    const idLines = doc.splitTextToSize(result.core_identity?.description || "", usable - 12);
     idLines.slice(0, 2).forEach((l, i) => doc.text(l, margin + 6, y + 26 + i * 5));
     y += 48;
 
@@ -523,7 +548,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setTextColor(...GREEN);
     doc.text("CORE INTERESTS", margin, y); y += 7;
     let cx = margin;
-    result.top_interests.forEach(interest => {
+    (result.top_interests || []).forEach(interest => {
       if (cx + interest.length * 2.2 + 12 > pageW - margin) { cx = margin; y += 9; }
       const w = chip(interest, cx, y, ORANGE);
       cx += w;
@@ -541,24 +566,24 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
 
     // Hidden Strength
     label("Hidden Strength We Noticed", BLUE);
-    body(result.hidden_strength, LIGHT);
+    body(result.hidden_strength || "", LIGHT);
     divider();
 
     // Primary Path
     label("Recommended Path", GREEN);
-    heading(result.primary_path.title, 14, LIGHT);
-    body(result.primary_path.why, LIGHT);
+    heading(result.primary_path?.title || "", 14, LIGHT);
+    body(result.primary_path?.why || "", LIGHT);
     doc.setFontSize(9);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(...GREEN);
-    doc.text(`First income estimate: ${result.primary_path.income_timeline}`, margin, y);
+    doc.text(`First income estimate: ${result.primary_path?.income_timeline || "--"}`, margin, y);
     y += 10;
     divider();
 
     // Alternative Path
     label("Alternative Path", MID);
-    heading(result.alternative_path.title, 12, LIGHT);
-    body(result.alternative_path.why, MID, 9);
+    heading(result.alternative_path?.title || "", 12, LIGHT);
+    body(result.alternative_path?.why || "", MID, 9);
     divider();
 
     // 90 Day Plan
@@ -570,18 +595,18 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     // Subtract left col, left pad, AND right edge padding so text never overflows
     const RIGHT_WIDTH = usable - LEFT_COL - PAD - 8;
 
-    result["90_day_plan"].forEach((step, i) => {
+    (result["90_day_plan"] || []).forEach((step, i) => {
       // CRITICAL: set font BEFORE splitTextToSize so measurements are accurate
       // Use a tighter RIGHT_WIDTH with generous safety margin
       const SAFE_WIDTH = RIGHT_WIDTH - 6;
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(9);
-      const actionLines = doc.splitTextToSize(step.action, SAFE_WIDTH);
+      const actionLines = doc.splitTextToSize(step.action || "", SAFE_WIDTH);
 
       doc.setFont("helvetica", "normal");
       doc.setFontSize(7.5);
-      const resourceLines = doc.splitTextToSize(`→ ${step.resource}`, SAFE_WIDTH);
+      const resourceLines = doc.splitTextToSize(`→ ${step.resource || ""}`, SAFE_WIDTH);
 
       const contentLines = Math.min(actionLines.length, 3) + Math.min(resourceLines.length, 2);
       const boxH = Math.max(28, contentLines * 5.8 + 16);
@@ -602,11 +627,11 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
       doc.setFontSize(9);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(...ORANGE);
-      doc.text(step.week, margin + PAD + 1, y + 9);
+      doc.text(step.week || "", margin + PAD + 1, y + 9);
       doc.setTextColor(...MID);
       doc.setFontSize(6.5);
       doc.setFont("helvetica", "bold");
-      doc.text(step.focus.toUpperCase(), margin + PAD + 1, y + 15);
+      doc.text((step.focus || "").toUpperCase(), margin + PAD + 1, y + 15);
 
       // Vertical divider
       doc.setDrawColor(220, 215, 210);
@@ -641,7 +666,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     // Skill Gaps
     label("Skills to Develop", [212, 121, 107]);
     let sx = margin;
-    result.skill_gaps.forEach(gap => {
+    (result.skill_gaps || []).forEach(gap => {
       if (sx + gap.length * 2.2 + 12 > pageW - margin) { sx = margin; y += 9; }
       const w = chip(gap, sx, y, [212, 121, 107]);
       sx += w;
@@ -662,7 +687,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFont("helvetica", "normal");
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(9);
-    const winLines = doc.splitTextToSize(result.immediate_win, usable - 8);
+    const winLines = doc.splitTextToSize(result.immediate_win || "", usable - 8);
     winLines.slice(0, 2).forEach((l, i) => doc.text(l, margin + 4, y + 13 + i * 5));
     y += 28;
     divider();
@@ -672,7 +697,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFillColor(245, 240, 255);
     doc.setDrawColor(...PURPLE);
     doc.setLineWidth(0.4);
-    const scLines = doc.splitTextToSize(result.bahai_connection, usable - 10);
+    const scLines = doc.splitTextToSize(result.bahai_connection || "", usable - 10);
     const scH = Math.min(scLines.length, 4) * 5.5 + 18;
     doc.roundedRect(margin, y, usable, scH, 3, 3, "FD");
     doc.setFontSize(8);
@@ -690,7 +715,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFontSize(11);
     doc.setFont("helvetica", "bolditalic");
     doc.setTextColor(139, 90, 20);
-    const affLines = doc.splitTextToSize(result.affirmation, usable);
+    const affLines = doc.splitTextToSize(result.affirmation || "", usable);
     affLines.forEach(l => { checkPage(8); doc.text(l, margin, y); y += 6.5; });
     y += 6;
 
@@ -703,7 +728,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
     doc.setFont("helvetica", "italic");
     doc.setTextColor(90, 106, 88);
     const q3Lines = doc.splitTextToSize(
-      "The earth is but one country, and mankind its citizens. - Bahaui-llah",
+      "The earth is but one country, and mankind its citizens. -- Bahá'u'lláh",
       usable - 8
     );
     q3Lines.forEach(l => { doc.text(l, margin + 6, y + 5); y += 6; });
@@ -724,15 +749,6 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
       setPdfLoading(false);
     }
   }
-
-  const btnStyle = (active, color = "#E8935A") => ({
-    background: active ? color : "rgba(255,255,255,0.05)",
-    border: `1.5px solid ${active ? color : "rgba(255,255,255,0.08)"}`,
-    borderRadius: 10, padding: "15px 20px",
-    textAlign: "left", color: active ? "#0D0D0D" : "#A0988F",
-    fontSize: 15, cursor: "pointer", fontFamily: "'Georgia', serif",
-    transition: "all 0.2s", width: "100%"
-  });
 
   // LIGHT THEME COLOURS
   const BG       = "#F7F5F2";
@@ -929,7 +945,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
             <BahaiStar size={72} variant="gold" />
             <div style={{ width: 60, height: 60, borderRadius: "50%", border: "3px solid #E2DDD8", borderTop: "3px solid #1B5E4B", animation: "spin 1.2s linear infinite", margin: "24px auto 32px" }} />
             <h2 style={{ fontSize: 26, fontWeight: 700, marginBottom: 14, color: "#1A1A1A" }}>Crafting your roadmap{loadingDots}</h2>
-            <p style={{ fontSize: 15, color: "#9A9490", maxWidth: 360, marginBottom: 48, lineHeight: 1.7 }}>Your answers are being woven into a personalised guide built just for you.</p>
+            <p style={{ fontSize: 15, color: "#9A9490", maxWidth: 360, marginBottom: 48, lineHeight: 1.7 }}>Your answers are being woven into a personalised guide built just for you. This can take up to a minute.</p>
             <div style={{ maxWidth: 420, padding: "24px 28px", borderLeft: "3px solid #C9943A", background: "#FFFBF4", textAlign: "left", borderRadius: "0 8px 8px 0" }}>
               <p style={{ fontSize: 14, lineHeight: 1.9, color: "#5A5450", fontStyle: "italic", margin: "0 0 8px" }}>"Man is the supreme Talisman. Lack of a proper education hath, however, deprived him of that which he doth inherently possess."</p>
               <span style={{ fontSize: 10, letterSpacing: 3, color: "#C9943A", textTransform: "uppercase", fontWeight: 700 }}>-- Bahá'u'lláh</span>
@@ -957,8 +973,8 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
             {/* Identity */}
             <div style={{ background: "linear-gradient(135deg, #EEF6F3, #FDF8EE)", border: "2px solid #C9943A", borderRadius: 16, padding: "36px 36px", marginBottom: 24, textAlign: "center" }}>
               <div style={{ fontSize: 10, letterSpacing: 5, color: "#C9943A", marginBottom: 14, textTransform: "uppercase", fontWeight: 700 }}>Your Core Identity</div>
-              <h2 style={{ fontSize: 28, fontWeight: 700, color: "#1B5E4B", marginBottom: 14, fontStyle: "italic" }}>"{result.core_identity.title}"</h2>
-              <p style={{ fontSize: 16, color: "#5A5450", lineHeight: 1.7, margin: 0 }}>{result.core_identity.description}</p>
+              <h2 style={{ fontSize: 28, fontWeight: 700, color: "#1B5E4B", marginBottom: 14, fontStyle: "italic" }}>"{result.core_identity?.title}"</h2>
+              <p style={{ fontSize: 16, color: "#5A5450", lineHeight: 1.7, margin: 0 }}>{result.core_identity?.description}</p>
             </div>
 
             {/* Hidden Strength */}
@@ -971,7 +987,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
             <div style={{ marginBottom: 36 }}>
               <div style={{ fontSize: 10, letterSpacing: 4, color: "#5A5450", marginBottom: 14, textTransform: "uppercase" }}>Your Core Interests</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {result.top_interests.map(i => (
+                {(result.top_interests || []).map(i => (
                   <span key={i} style={{ background: "#FEF3E8", border: "1.5px solid #C9943A", borderRadius: 50, padding: "7px 18px", fontSize: 13, color: "#8B5E1A", fontWeight: 700 }}>{i}</span>
                 ))}
               </div>
@@ -980,22 +996,22 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
             {/* Primary Path */}
             <div style={{ background: "#FFFFFF", border: "2px solid #1B5E4B", borderRadius: 14, padding: "28px 32px", marginBottom: 16 }}>
               <div style={{ fontSize: 10, letterSpacing: 4, color: "#1B5E4B", marginBottom: 10, textTransform: "uppercase", fontWeight: 700 }}>Recommended Path</div>
-              <h3 style={{ fontSize: 21, fontWeight: 700, color: "#1A1A1A", marginBottom: 12 }}>{result.primary_path.title}</h3>
-              <p style={{ fontSize: 15, color: "#2C2C2C", lineHeight: 1.75, marginBottom: 14 }}>{result.primary_path.why}</p>
-              <div style={{ fontSize: 13, color: "#1B5E4B", fontWeight: 700, background: "#EEF6F3", padding: "8px 12px", borderRadius: 6, display: "inline-block" }}>⏱ First income estimate: {result.primary_path.income_timeline}</div>
+              <h3 style={{ fontSize: 21, fontWeight: 700, color: "#1A1A1A", marginBottom: 12 }}>{result.primary_path?.title}</h3>
+              <p style={{ fontSize: 15, color: "#2C2C2C", lineHeight: 1.75, marginBottom: 14 }}>{result.primary_path?.why}</p>
+              <div style={{ fontSize: 13, color: "#1B5E4B", fontWeight: 700, background: "#EEF6F3", padding: "8px 12px", borderRadius: 6, display: "inline-block" }}>⏱ First income estimate: {result.primary_path?.income_timeline}</div>
             </div>
 
             {/* Alt Path */}
             <div style={{ background: "#FAFAFA", border: "1.5px solid #E2DDD8", borderRadius: 10, padding: "22px 28px", marginBottom: 36 }}>
               <div style={{ fontSize: 10, letterSpacing: 4, color: "#5A5450", marginBottom: 8, textTransform: "uppercase", fontWeight: 700 }}>Alternative Path</div>
-              <h4 style={{ fontSize: 17, fontWeight: 700, color: "#1A1A1A", marginBottom: 8 }}>{result.alternative_path.title}</h4>
-              <p style={{ fontSize: 14, color: "#3C3C3C", lineHeight: 1.7, margin: 0 }}>{result.alternative_path.why}</p>
+              <h4 style={{ fontSize: 17, fontWeight: 700, color: "#1A1A1A", marginBottom: 8 }}>{result.alternative_path?.title}</h4>
+              <p style={{ fontSize: 14, color: "#3C3C3C", lineHeight: 1.7, margin: 0 }}>{result.alternative_path?.why}</p>
             </div>
 
             {/* 90 Day Plan */}
             <div style={{ marginBottom: 44 }}>
               <div style={{ fontSize: 10, letterSpacing: 4, color: "#5A5450", marginBottom: 20, textTransform: "uppercase" }}>Your 90-Day Action Plan</div>
-              {result["90_day_plan"].map((step, i) => (
+              {(result["90_day_plan"] || []).map((step, i) => (
                 <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 16, background: "#FFFFFF", border: "1.5px solid #E2DDD8", borderRadius: 10, padding: "20px 24px", marginBottom: 10, alignItems: "start", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" }}>
                   <div>
                     <div style={{ fontSize: 12, color: "#C9943A", fontWeight: 700, marginBottom: 4 }}>{step.week}</div>
@@ -1013,7 +1029,7 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
             <div style={{ marginBottom: 36 }}>
               <div style={{ fontSize: 10, letterSpacing: 4, color: "#5A5450", marginBottom: 14, textTransform: "uppercase" }}>Skills to Develop</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {result.skill_gaps.map(g => (
+                {(result.skill_gaps || []).map(g => (
                   <span key={g} style={{ background: "#FEF0EE", border: "1.5px solid #D4796B", borderRadius: 50, padding: "7px 16px", fontSize: 13, color: "#9B3A2C", fontWeight: 600 }}>{g}</span>
                 ))}
               </div>
@@ -1045,10 +1061,10 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
 
               <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
                 <button onClick={downloadPDF} disabled={pdfLoading}
-                  style={{ background: pdfLoading ? "#A8D5C2" : "#1B5E4B", border: "none", borderRadius: 8, padding: "14px 32px", color: "#0D0D0D", cursor: pdfLoading ? "wait" : "pointer", fontSize: 15, fontWeight: 700, letterSpacing: 1, transition: "all 0.3s", boxShadow: pdfLoading ? "none" : "0 4px 14px rgba(27,94,75,0.3)" }}>
+                  style={{ background: pdfLoading ? "#A8D5C2" : "#1B5E4B", border: "none", borderRadius: 8, padding: "14px 32px", color: "#FFFFFF", cursor: pdfLoading ? "wait" : "pointer", fontSize: 15, fontWeight: 700, letterSpacing: 1, transition: "all 0.3s", boxShadow: pdfLoading ? "none" : "0 4px 14px rgba(27,94,75,0.3)" }}>
                   {pdfLoading ? "Preparing PDF..." : "↓ Download My Roadmap (PDF)"}
                 </button>
-                <button onClick={() => { setPhase("intro"); setAnswers({}); setCurrentQ(0); setResult(null); setUserName(""); setSaved(false); }}
+                <button onClick={() => { setPhase("intro"); setAnswers({}); setCurrentQ(0); setResult(null); setUserName(""); setSaved(false); setWantsMentor(false); }}
                   style={{ background: "none", border: "2px solid #E2DDD8", borderRadius: 8, padding: "14px 26px", color: "#9A9490", cursor: "pointer", fontSize: 13, transition: "all 0.2s" }}>
                   Start Over
                 </button>
@@ -1063,15 +1079,15 @@ Return ONLY a JSON object (no markdown, no backticks) with this exact structure:
               <div style={{ fontSize: 32, marginBottom: 20 }}>⚠️</div>
               <h3 style={{ color: "#D4796B", fontSize: 20, fontWeight: 400, marginBottom: 16 }}>Roadmap generation failed</h3>
               <div style={{ background: "rgba(212,121,107,0.08)", border: "1px solid rgba(212,121,107,0.25)", borderRadius: 10, padding: "16px 20px", marginBottom: 24, textAlign: "left" }}>
-                <p style={{ fontSize: 13, color: "#D4796B", margin: 0, fontFamily: "monospace", lineHeight: 1.6 }}>
-                  {result.message || "Unknown error"}
+                <p style={{ fontSize: 13, color: "#D4796B", margin: 0, lineHeight: 1.6 }}>
+                  {result.message || "Something went wrong."}
                 </p>
               </div>
               <p style={{ fontSize: 14, color: "#6B6460", marginBottom: 28, lineHeight: 1.7 }}>
-                Common fixes: check your Anthropic API key is correct in Vercel, ensure billing is active at console.anthropic.com, then redeploy.
+                Your answers are safe. Tap Try Again -- this usually works on the second attempt.
               </p>
               <button onClick={() => setPhase("loading")} style={{ background: "#E8935A", border: "none", borderRadius: 8, padding: "13px 30px", color: "#0D0D0D", cursor: "pointer", fontSize: 14, fontFamily: "'Georgia', serif", marginRight: 12 }}>Try Again</button>
-              <button onClick={() => { setPhase("intro"); setAnswers({}); setCurrentQ(0); setResult(null); setUserName(""); setSaved(false); }} style={{ background: "none", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "13px 24px", color: "#6B6460", cursor: "pointer", fontSize: 14, fontFamily: "'Georgia', serif" }}>Start Over</button>
+              <button onClick={() => { setPhase("intro"); setAnswers({}); setCurrentQ(0); setResult(null); setUserName(""); setSaved(false); setWantsMentor(false); }} style={{ background: "none", border: "2px solid #E2DDD8", borderRadius: 8, padding: "13px 24px", color: "#6B6460", cursor: "pointer", fontSize: 14, fontFamily: "'Georgia', serif" }}>Start Over</button>
             </div>
           </div>
         )}
