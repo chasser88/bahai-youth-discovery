@@ -1,100 +1,142 @@
-export const config = { runtime: "edge" };
+export const config = { maxDuration: 60 };
 
-export default async function handler(req) {
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Content-Type": "application/json"
-  };
+const ANTHROPIC_TIMEOUT_MS = 50000;
 
-  if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
-  if (req.method !== "POST") return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers: corsHeaders });
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
-    const body = await req.json();
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const { prompt, saveData } = body;
 
-    // Handle Airtable save request
+    // ---- Airtable save ----
     if (saveData) {
-      // Try both VITE_ and non-VITE_ prefixed variables
       const airtableToken = process.env.AIRTABLE_TOKEN || process.env.VITE_AIRTABLE_TOKEN;
       const airtableBaseId = process.env.AIRTABLE_BASE_ID || process.env.VITE_AIRTABLE_BASE_ID;
 
       if (!airtableToken || !airtableBaseId) {
-        return new Response(JSON.stringify({ 
-          saved: false, 
-          error: "Missing Airtable config",
+        console.error("Airtable config missing", {
           hasToken: !!airtableToken,
-          hasBaseId: !!airtableBaseId,
-          envKeys: Object.keys(process.env).filter(k => k.includes('AIRTABLE') || k.includes('airtable'))
-        }), { status: 200, headers: corsHeaders });
+          hasBaseId: !!airtableBaseId
+        });
+        return res.status(200).json({ saved: false, error: "Missing Airtable config" });
       }
 
-      const atRes = await fetch(`https://api.airtable.com/v0/${airtableBaseId}/Responses`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${airtableToken}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ fields: saveData })
-      });
+      const atRes = await fetch(
+        `https://api.airtable.com/v0/${airtableBaseId}/Responses`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${airtableToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ fields: saveData })
+        }
+      );
 
-      const atData = await atRes.json();
+      const atRaw = await atRes.text();
       if (!atRes.ok) {
-        return new Response(JSON.stringify({ 
-          saved: false, 
-          error: atData?.error?.message || "Airtable error",
-          status: atRes.status,
-          details: JSON.stringify(atData)
-        }), { status: 200, headers: corsHeaders });
+        console.error("Airtable error", atRes.status, atRaw);
+        let msg = "Airtable error";
+        try { msg = JSON.parse(atRaw)?.error?.message || msg; } catch {}
+        return res.status(200).json({ saved: false, error: msg });
       }
-      return new Response(JSON.stringify({ saved: true }), { status: 200, headers: corsHeaders });
+      return res.status(200).json({ saved: true });
     }
 
-    // Handle AI generation request
-    if (!prompt) return new Response(JSON.stringify({ error: "No prompt provided" }), { status: 400, headers: corsHeaders });
+    // ---- AI generation ----
+    if (!prompt) return res.status(400).json({ error: "No prompt provided" });
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 2000,
-        system: "You are a helpful assistant. Always respond with valid JSON only. No markdown, no backticks, no explanation — just the raw JSON object starting with { and ending with }.",
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error("ANTHROPIC_API_KEY not set");
+      return res.status(500).json({ error: "Server misconfigured: missing API key" });
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ANTHROPIC_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 2000,
+          system:
+            "You are a helpful assistant. Always respond with valid JSON only. No markdown, no backticks, no explanation — just the raw JSON object starting with { and ending with }.",
+          messages: [{ role: "user", content: prompt }]
+        })
+      });
+    } catch (e) {
+      if (e.name === "AbortError") {
+        return res.status(504).json({
+          error: "Generation timed out. Please try again."
+        });
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const raw = await response.text();
 
     if (!response.ok) {
-      const err = await response.json();
-      return new Response(JSON.stringify({ error: err?.error?.message || "Anthropic error: " + response.status }), { status: response.status, headers: corsHeaders });
+      console.error("Anthropic error", response.status, raw.slice(0, 500));
+      let msg = `Anthropic error ${response.status}`;
+      try { msg = JSON.parse(raw)?.error?.message || msg; } catch {}
+      return res.status(response.status).json({ error: msg });
     }
 
-    const data = await response.json();
-    if (!data.content || !data.content.length) return new Response(JSON.stringify({ error: "Empty response from Anthropic" }), { status: 500, headers: corsHeaders });
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      console.error("Non-JSON from Anthropic:", raw.slice(0, 500));
+      return res.status(502).json({ error: "Upstream returned non-JSON response" });
+    }
+
+    if (!data.content?.length) {
+      return res.status(500).json({ error: "Empty response from Anthropic" });
+    }
 
     let text = data.content.map(i => i.text || "").join("").trim();
-    text = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+    text = text
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
 
-    const firstBrace = text.indexOf("{");
-    const lastBrace = text.lastIndexOf("}");
-    if (firstBrace === -1 || lastBrace === -1) return new Response(JSON.stringify({ error: "No JSON found in AI response" }), { status: 500, headers: corsHeaders });
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first === -1 || last === -1) {
+      console.error("No JSON braces found:", text.slice(0, 300));
+      return res.status(500).json({ error: "No JSON found in AI response" });
+    }
 
     let parsed;
     try {
-      parsed = JSON.parse(text.substring(firstBrace, lastBrace + 1));
+      parsed = JSON.parse(text.substring(first, last + 1));
     } catch (e) {
-      return new Response(JSON.stringify({ error: "JSON parse failed: " + e.message }), { status: 500, headers: corsHeaders });
+      console.error("Parse failed:", text.slice(0, 300));
+      return res.status(500).json({ error: "JSON parse failed: " + e.message });
     }
 
-    return new Response(JSON.stringify(parsed), { status: 200, headers: corsHeaders });
-
+    return res.status(200).json(parsed);
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message || "Internal server error" }), { status: 500, headers: corsHeaders });
+    console.error("generate failed:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
   }
 }
